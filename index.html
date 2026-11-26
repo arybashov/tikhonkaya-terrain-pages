@@ -6413,7 +6413,9 @@ THE SOFTWARE.
 
     function nearestRoadProgress(path,east,south,from=0,radius=Infinity) {
       let nearest = {distance:Infinity,at:0};
-      for (let i=0; i<path.points.length-1; i++) {
+      const first=Number.isFinite(radius) ? Math.max(0,cellIndex(path.meters,from-radius)-1) : 0;
+      const last=Number.isFinite(radius) ? cellIndex(path.meters,from+radius)+1 : path.points.length-1;
+      for (let i=first; i<last; i++) {
         if (path.meters[i+1]<from-radius || path.meters[i]>from+radius) continue;
         const [x,z]=path.points[i], [nx,nz]=path.points[i+1];
         const dx=nx-x,dz=nz-z;
@@ -6423,83 +6425,640 @@ THE SOFTWARE.
       }
       return nearest;
     }
+    const trafficBodyMaterial = new T.MeshBasicMaterial({vertexColors:true,side:T.DoubleSide});
+    const trafficTailMaterial = new T.MeshBasicMaterial({color:0x923b38,side:T.DoubleSide});
+    const trafficBrakeMaterial = new T.MeshBasicMaterial({color:0xf05a48,side:T.DoubleSide});
 
-    const villageTrafficToggle = $("village-traffic");
-    const trafficRoot = new T.Group();
-    const trafficMaterial = new T.MeshBasicMaterial({vertexColors:true,side:T.DoubleSide});
-    const roadsideTraffic = villageRoads.traffic.flatMap((route,routeIndex) => {
-      const path=pathFromPoints(route.line);
-      const count=route.kind==="highway" ? 8 : 3;
-      const cars=[];
-      for (let index=0;index<count;index++) {
-        const material=[0x65817c,0xb4b6aa,0x785d54,0x4c5663,0xc9b589,0x7c8171][(index+routeIndex*2)%6];
-        const car=trafficBody(material,(index+routeIndex)%3===0);
-        trafficRoot.add(car);
-        cars.push({car,path,direction:index%2 ? -1 : 1,
-          phase:path.length*((index+.39+routeIndex*.17)/count),
-          speed:route.kind==="highway" ? 11.8+index%2*.7 : 5.4+index%2*.6,
-          lane:route.kind==="highway" ? 1.92 : 1.14,east:0,south:0,heading:0});
+    function vehicleGeometry() {
+      const positions=[], colors=[];
+      const palette=new Map();
+      function face(corners,color,shade) {
+        if (!palette.has(color)) {
+          palette.set(color,[16,8,0].map(shift=>{
+            const channel=((color>>shift)&255)/255;
+            return channel<=.04045 ? channel/12.92 : ((channel+.055)/1.055)**2.4;
+          }));
+        }
+        const [r,g,b]=palette.get(color);
+        const nx=(corners[1][1]-corners[0][1])*(corners[2][2]-corners[0][2])-
+          (corners[1][2]-corners[0][2])*(corners[2][1]-corners[0][1]);
+        const ny=(corners[1][2]-corners[0][2])*(corners[2][0]-corners[0][0])-
+          (corners[1][0]-corners[0][0])*(corners[2][2]-corners[0][2]);
+        const nz=(corners[1][0]-corners[0][0])*(corners[2][1]-corners[0][1])-
+          (corners[1][1]-corners[0][1])*(corners[2][0]-corners[0][0]);
+        const light=shade ?? (.66+.30*Math.max(0,(-.36*nx+.83*ny+.27*nz)/(Math.hypot(nx,ny,nz)||1)));
+        for (let i=1;i<corners.length-1;i++) {
+          positions.push(...corners[0],...corners[i],...corners[i+1]);
+          for (let j=0;j<3;j++) colors.push(r*light,g*light,b*light);
+        }
       }
-      return cars;
-    });
-    view.add(trafficRoot);
-
-    function trafficBody(paint,wagon) {
-      const xyz=[], colors=[];
-      function make(corners,color) {
-        const rgb=[16,8,0].map(shift=>{
-          const channel=((color>>shift)&255)/255;
-          return channel<=.04045 ? channel/12.92 : ((channel+.055)/1.055)**2.4;
-        });
-        for (const [a,b,c,d] of [[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]) {
-          for (const k of [a,b,c,a,c,d]) {
-            xyz.push(...corners[k]);
-            colors.push(...rgb);
+      function shell(rings,sideColors) {
+        face(rings[0],sideColors[0],.73);
+        face([...rings.at(-1)].reverse(),sideColors[0],.85);
+        for (let i=0;i<rings.length-1;i++) {
+          const a=rings[i],b=rings[i+1];
+          for (let j=0;j<a.length;j++) {
+            const k=(j+1)%a.length;
+            face([a[j],a[k],b[k],b[j]],sideColors[j%sideColors.length],
+              [.69,.76,.83,1,.90,.75,.68,.62][j%8]);
           }
         }
       }
+      function band(z,width,y0,y1,bevel=.10) {
+        return [
+          [-width+bevel,y0,z],[-width,y0+bevel,z],[-width,y1-bevel,z],[-width+bevel,y1,z],
+          [width-bevel,y1,z],[width,y1-bevel,z],[width,y0+bevel,z],[width-bevel,y0,z],
+        ];
+      }
       function box(x0,x1,y0,y1,z0,z1,color) {
-        make([[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1],
-          [x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]],color);
+        const a=[[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]];
+        const b=a.map(([x,y])=>[x,y,z1]);
+        shell([a,b],[color]);
       }
-      const back=wagon ? -1.11 : -.86;
-      box(-.83,.83,.33,.87,-2.13,2.05,paint);
-      make([[-.76,.87,-1.48],[.76,.87,-1.48],[.76,.87,1.21],[-.76,.87,1.21],
-         [-.62,wagon?1.65:1.47,back],[.62,wagon?1.65:1.47,back],[.64,wagon?1.65:1.47,.51],[-.64,wagon?1.65:1.47,.51]],0x344449);
-      box(-.635,.635,wagon?1.62:1.45,wagon?1.69:1.51,back,.51,paint);
+      function wheel(x,y,z,radius,width) {
+        const side=Math.sign(x);
+        const rings=[[x-side*width,radius*.84],[x-side*(width-.045),radius],
+          [x-side*.045,radius],[x,radius*.87]];
+        const circles=rings.map(([axis,r])=>Array.from({length:14},(_,i)=>{
+          const angle=side*i*Math.PI/7;
+          return [axis,y+r*Math.sin(angle),z+r*Math.cos(angle)];
+        }));
+        for (let i=0;i<circles.length-1;i++) {
+          for (let j=0;j<14;j++) {
+            const k=(j+1)%14;
+            face([circles[i][j],circles[i][k],circles[i+1][k],circles[i+1][j]],0x242828,
+              .60+.28*Math.max(0,Math.sin(side*j*Math.PI/7)));
+          }
+        }
+        face(circles.at(-1),0x323536,.83);
+        function disk(scale,offset,color) {
+          face(circles.at(-1).map(([,dy,dz])=>[x+side*offset,y+(dy-y)*scale,z+(dz-z)*scale]),color,.91);
+        }
+        disk(.68,.002,0xa1aaae);
+        disk(.43,.006,0x42494e);
+        disk(.19,.009,0xbbc1c5);
+      }
+      function mesh(material=trafficBodyMaterial) {
+        const geometry=new T.BufferGeometry();
+        geometry.setAttribute("position",new T.BufferAttribute(new Float32Array(positions),3));
+        geometry.setAttribute("color",new T.BufferAttribute(new Float32Array(colors),3));
+        return new T.Mesh(geometry,material);
+      }
+      return {face,shell,band,box,wheel,mesh};
+    }
+
+    function trafficModel(kind,paint,cargoPaint) {
+      const truck=kind==="semi";
+      const van=kind==="van";
+      const suv=kind==="suv";
+      const halfWidth=truck ? 1.25 : van ? 1.02 : suv ? .96 : .91;
+      const front=truck ? 3.12 : van ? 2.63 : suv ? 2.37 : 2.32;
+      const back=truck ? 2.36 : van ? 2.77 : suv ? 2.36 : 2.27;
+      const {face,shell,band,box,wheel,mesh}=vehicleGeometry();
+      const trim=0x31393a,glass=0x4c7889;
+      const base=truck ? .54 : suv||van ? .35 : .27;
+      const shoulder=truck ? 1.34 : van ? 1.05 : suv ? .98 : .85;
+      const roof=truck ? 3.39 : van ? 2.32 : suv ? 1.79 : 1.49;
+      const bodyWidth=halfWidth-.07;
+      const w=bodyWidth;
+      shell([band(-back,w*.87,base+.07,shoulder-.11),band(-back+.34,w,base,shoulder),
+        band(front-.60,w,base,shoulder+.02),band(front,w*.88,base+.12,shoulder-.085)],[paint]);
+      const lowerBack=truck ? -.90 : van ? -back+.14 : suv ? -1.91 : -1.45;
+      const lowerFront=truck ? front-.12 : van ? front-.53 : suv ? 1.18 : 1.24;
+      const upperBack=lowerBack+(truck||van ? .16 : suv ? .45 : .42);
+      const upperFront=lowerFront-(truck ? .19 : van ? .77 : suv ? .66 : .59);
+      const footY=shoulder-.04;
+      const sill=truck ? 1.92 : shoulder+.08;
+      const capY=roof-.12;
+      const cabinWidth=w*(truck||van ? .93 : .85);
+      const capWidth=w*(truck||van ? .88 : .70);
+      function cabinRing(side) {
+        return [[side*cabinWidth,footY,lowerBack],[side*cabinWidth,footY,lowerFront],
+          [side*capWidth,capY,upperFront],[side*capWidth,capY,upperBack]];
+      }
+      const [l0,l1,l2,l3]=cabinRing(-1),[r0,r1,r2,r3]=cabinRing(1);
+      face([l0,l1,l2,l3],paint,.80);
+      face([r3,r2,r1,r0],paint,.94);
+      face([l1,r1,r2,l2],paint,.84);
+      face([l0,r0,r3,l3],paint,.75);
+      shell([band(upperBack,capWidth+.015,capY-.07,roof-.012,.058),
+        band(upperFront,capWidth+.015,capY-.07,roof,.058)],[paint]);
+      function along(a,b,t) { return a.map((v,i)=>v+(b[i]-v)*t); }
+      function windows(a,b,c,d,normal) {
+        const gap=(sill-footY)/(capY-footY);
+        const lowA=along(a,d,gap),lowB=along(b,c,gap);
+        const topA=along(a,d,.955),topB=along(b,c,.955);
+        const lift=(p)=>p.map((v,i)=>v+normal[i]*.017);
+        const window=(from,to,color)=>face([along(lowA,lowB,from),along(lowA,lowB,to),
+          along(topA,topB,to),along(topA,topB,from)].map(lift),color,.87);
+        window(.052,.948,trim);
+        window(.078,.922,glass);
+        if (normal[0]) {
+          window(.44,.47,trim);
+          if (van) window(.08,.46,paint);
+        }
+      }
+      windows(l1,r1,r2,l2,[0,0,1]);
+      if (!truck) windows(r0,l0,l3,r3,[0,0,-1]);
+      windows(l0,l1,l2,l3,[-1,0,0]);
+      windows(r0,r1,r2,r3,[1,0,0]);
       for (const side of [-1,1]) {
-        for (const z of [-1.41,1.36]) box(side*.78-.12,side*.78+.12,.0,.53,z-.30,z+.30,0x292d2a);
-        box(side*.65-.16,side*.65+.16,.62,.80,2.05,2.079,0xd8d3ba);
-        box(side*.65-.16,side*.65+.16,.57,.77,-2.16,-2.13,0x913c36);
+        const tire=truck ? .53 : suv||van ? .38 : .33;
+        const axles=truck ? [-1.73,1.81] : [-back+.77,front-.82];
+        for (const z of axles) wheel(side*(w+.025),tire,z,tire,truck ? .30 : .22);
+        const mirrorZ=lowerFront-(truck ? .28 : .52);
+        const mirrorY=truck ? 2.13 : shoulder+.18;
+        box(side<0 ? -halfWidth-.07 : w*.79,side<0 ? -w*.79 : halfWidth+.07,
+          mirrorY,mirrorY+.10,mirrorZ-.10,mirrorZ+.08,trim);
+        const x=w*.68;
+        box(side*x-.18,side*x+.18,shoulder-.21,shoulder-.11,front-.028,front+.011,0xe8f1eb);
+        box(side*x-.17,side*x+.17,shoulder-.23,shoulder-.12,-back-.024,-back+.01,0x9d342e);
       }
-      const geometry=new T.BufferGeometry();
-      geometry.setAttribute("position",new T.BufferAttribute(new Float32Array(xyz),3));
-      geometry.setAttribute("color",new T.BufferAttribute(new Float32Array(colors),3));
-      return new T.Mesh(geometry,trafficMaterial);
+      box(-w*.63,w*.63,base+.06,base+(truck ? .62 : .19),front-.005,front+.014,trim);
+      box(-.23,.23,base+.15,base+.24,-back-.02,-back,0xdaddcf);
+      if (truck) for (let j=0;j<4;j++) {
+        const y=base+.18+j*.105;
+        box(-.69,.69,y,y+.023,front+.014,front+.022,0x858d8e);
+      }
+      const body=mesh();
+      function brakeLights(width,height,z) {
+        const lights=vehicleGeometry();
+        for (const side of [-1,1]) {
+          const x=side*width;
+          lights.box(x-.13,x+.13,height,height+.063,z-.012,z,0xffffff);
+        }
+        return lights.mesh(trafficTailMaterial);
+      }
+      const brake=brakeLights(w*.68,shoulder-.20,-back-.026);
+      body.add(brake);
+      if (!truck) return {body,brake,halfWidth:halfWidth+.06,front,back};
+
+      const cargo=vehicleGeometry();
+      const trailerHalf=6.14, trailerWidth=1.27;
+      cargo.shell([cargo.band(-trailerHalf,trailerWidth,1.10,3.98,.055),
+        cargo.band(trailerHalf,trailerWidth,1.10,3.98,.055)],[cargoPaint]);
+      cargo.box(-1.14,1.14,.72,1.20,-trailerHalf,5.34,0x404746);
+      cargo.box(-1.25,1.25,3.93,4.02,-trailerHalf,trailerHalf,0xb2b6ac);
+      cargo.box(-1.24,1.24,1.14,1.225,-trailerHalf,trailerHalf,0x959c97);
+      cargo.box(-.028,.028,1.34,3.83,-trailerHalf-.023,-trailerHalf,0x919c96);
+      for (const side of [-1,1]) {
+        const x=side*.47;
+        cargo.box(x-.028,x+.028,1.32,3.80,-trailerHalf-.035,-trailerHalf-.001,0xa7ada6);
+        const edge=side*(trailerWidth-.045);
+        for (let z=-5.35; z<5.75; z+=1.13) {
+          cargo.box(edge-.045,edge+.045,1.194,1.266,z-.13,z+.14,0xd8a44a);
+        }
+        for (const z of [-4.98,-3.92,-2.86]) cargo.wheel(side*1.26,.484,z,.484,.32);
+      }
+      cargo.box(-1.20,1.20,.63,.76,-trailerHalf-.07,-trailerHalf+.06,0x9eaaab);
+      cargo.box(-.24,.24,.77,.88,-trailerHalf-.077,-trailerHalf,0xdedbcb);
+      const trailer=cargo.mesh(), trailerBrake=brakeLights(.96,.86,-trailerHalf-.06);
+      trailer.add(trailerBrake);
+      return {body,brake,trailer,trailerBrake,halfWidth:halfWidth+.08,trailerWidth,trailerHalf,front,back};
+    }
+    const villageTrafficToggle = $("village-traffic");
+    const trafficRoot = new T.Group();
+    view.add(trafficRoot);
+    const carriageways = villageRoads.traffic.map(route=>pathFromPoints(route.line));
+    const mergeLimits = (() => {
+      const [highway,street]=carriageways;
+      let branch=0, main=0;
+      // After this junction both streams use the same lanes. The right-of-way
+      // zone covers the turn itself; following distance handles the shared road.
+      for (let at=0;at<=street.length;at+=2) {
+        const [x,z]=roadSample(street,at);
+        const match=nearestRoadProgress(highway,x,z);
+        if (match.distance<5) { branch=at; main=match.at; }
+      }
+      return [[main-22,main+27],[branch-27,branch+26]];
+    })();
+    const trafficZones=[{limits:mergeLimits,owner:null,reservation:0}];
+    carriageways.forEach((path,index)=>{
+      let bend=null;
+      const turnSpan=10;
+      for (let at=turnSpan;at<path.length-turnSpan;at+=2) {
+        const before=roadSample(path,at-8)[2], after=roadSample(path,at+8)[2];
+        const winding=Math.abs(Math.atan2(Math.sin(after-before),Math.cos(after-before)))>.50;
+        if (winding && bend===null) bend=at;
+        if ((!winding || at+2>=path.length-turnSpan) && bend!==null) {
+          const first=bend-8,last=at+8;
+          const major=mergeLimits[index];
+          if (!major || last<major[0] || first>major[1]) {
+            const limits=[];
+            limits[index]=[first,last];
+            trafficZones.push({limits,owner:null,reservation:0});
+          }
+          bend=null;
+        }
+      }
+    });
+    const cultureDriveways=villageRoads.parking.stops["village-culture"].approaches;
+    const cultureStations=cultureDriveways.map(points=>nearestRoadProgress(carriageways[1],...points[0]).at);
+    trafficZones.push({limits:[null,[Math.min(...cultureStations)-11,Math.max(...cultureStations)+11]],
+      owner:null,reservation:0});
+
+    function trafficLane(path,index,direction) {
+      const points=[], meters=[];
+      const size=Math.ceil(path.length/1.5);
+      for (let i=0;i<=size;i++) {
+        const along=path.length*i/size;
+        const at=direction>0 ? along : path.length-along;
+        const [x,z]=roadSample(path,at);
+        const [a,b]=roadSample(path,at-2.25);
+        const [c,d]=roadSample(path,at+2.25);
+        const angle=Math.atan2((c-a)*direction,(d-b)*direction);
+        const wide=index===0 ? 1 : index===1 ?
+          Math.max(0,Math.min(1,(13-nearestRoadProgress(carriageways[0],x,z).distance)/9)) : 0;
+        const offset=1.40+.76*wide;
+        points.push([x-Math.cos(angle)*offset,z+Math.sin(angle)*offset]);
+        meters.push(along);
+      }
+      return {points,meters,length:path.length};
+    }
+
+    const paintColors=[0x567c89,0xc9c6b8,0x943f37,0x414e5e,0xaac0b5,0xb5a179,0x5d6963,0x666a75];
+    const roadsideTraffic = carriageways.flatMap((path,index)=>{
+      const forward=trafficLane(path,index,1), backward=trafficLane(path,index,-1);
+      const kinds=index===0 ?
+        ["semi","sedan","suv","semi","van","suv","sedan","van","semi","sedan","suv","van"] :
+        ["suv","sedan","van","sedan"];
+      return kinds.map((kind,number)=>{
+        const direction=number%2===0 ? 1 : -1;
+        const lane=direction>0 ? forward : backward;
+        const appearance=trafficModel(kind,paintColors[(number+index*2)%paintColors.length],
+          [0xd7d3c2,0x538091,0x8f8a78][Math.floor(number/3)%3]);
+        trafficRoot.add(appearance.body);
+        if (appearance.trailer) trafficRoot.add(appearance.trailer);
+        const desiredSpeed=index===0 ? kind==="semi" ? 13.0+number%3*.42 : 15.6+number%4*.58
+          : 5.9+number%3*.55;
+        const start=appearance.trailer ? 16 : 4.7;
+        const gates=trafficZones.flatMap(zone=>{
+          const limits=zone.limits[index];
+          if (!limits) return [];
+          const [low,high]=limits;
+          const [enter,leave]=direction>0 ? limits : [path.length-high,path.length-low];
+          return [{zone,enter,leave,waiting:0}];
+        });
+        const initial=start+(lane.length-start-12)*(number+.44+index*.13)/kinds.length;
+        const mergeGroup=index*2+(direction<0 ? 1 : 0);
+        return {...appearance,kind,lane,index,gates,mergeGroup,direction,start,initial,desiredSpeed,
+          tail:appearance.trailer ? 14.3 : appearance.back,
+          along:start,speed:0,active:false,delay:0,pose:null,braking:false};
+      });
+    });
+    const shadowCapacity=roadsideTraffic.length+roadsideTraffic.filter(npc=>npc.trailer).length;
+    const shadowPositions=new Float32Array(shadowCapacity*72*3);
+    const shadowColors=new Float32Array(shadowCapacity*72*4);
+    const trafficShadows=new T.BufferGeometry();
+    trafficShadows.setAttribute("position",new T.BufferAttribute(shadowPositions,3));
+    trafficShadows.setAttribute("color",new T.BufferAttribute(shadowColors,4));
+    trafficShadows.setDrawRange(0,0);
+    const trafficShade=new T.Mesh(trafficShadows,new T.MeshBasicMaterial({
+      color:0x151b16,vertexColors:true,transparent:true,depthWrite:false,side:T.DoubleSide,
+    }));
+    trafficShade.frustumCulled=false;
+    trafficRoot.add(trafficShade);
+    const shadowOutline=[[-.70,-1],[.70,-1],[1,-.72],[1,.72],[.70,1],[-.70,1],[-1,.72],[-1,-.72]];
+
+    function updateTrafficShadows() {
+      let vertex=0;
+      function point(x,z,alpha) {
+        shadowPositions[vertex*3]=x;
+        shadowPositions[vertex*3+1]=groundHeight(x,z)+.254;
+        shadowPositions[vertex*3+2]=z;
+        shadowColors.set([1,1,1,alpha],vertex*4);
+        vertex++;
+      }
+      for (const npc of roadsideTraffic) {
+        if (!npc.active) continue;
+        for (const {east,south,cos,sin,halfWidth,length} of npc.pose.boxes) {
+          function corner(index,scale,alpha) {
+            const [a,b]=shadowOutline[index];
+            const x=a*(halfWidth+.24)*scale, z=b*(length+.29)*scale;
+            point(east+x*cos+z*sin,south-x*sin+z*cos,alpha);
+          }
+          for (let i=0;i<8;i++) {
+            const j=(i+1)%8, solid=.23, inner=.78;
+            point(east,south,solid); corner(i,inner,solid); corner(j,inner,solid);
+            corner(i,inner,solid); corner(i,1,0); corner(j,1,0);
+            corner(i,inner,solid); corner(j,1,0); corner(j,inner,solid);
+          }
+        }
+      }
+      trafficShadows.setDrawRange(0,vertex);
+      trafficShadows.attributes.position.needsUpdate=true;
+      trafficShadows.attributes.color.needsUpdate=true;
+    }
+
+    function trafficBox(east,south,heading,halfWidth,front,back) {
+      const sin=Math.sin(heading),cos=Math.cos(heading);
+      const offset=(front-back)/2;
+      const length=(front+back)/2;
+      return {east:east+sin*offset,south:south+cos*offset,heading,sin,cos,halfWidth,length,
+        radius:Math.hypot(length,halfWidth)};
+    }
+
+    function trafficOverlap(a,b,pad=.10) {
+      const x=b.east-a.east,z=b.south-a.south;
+      if (Math.abs(x)>a.radius+b.radius+pad || Math.abs(z)>a.radius+b.radius+pad) return false;
+      const alignment=Math.abs(a.sin*b.sin+a.cos*b.cos);
+      const crossing=Math.abs(a.cos*b.sin-a.sin*b.cos);
+      return Math.abs(x*a.sin+z*a.cos)<a.length+b.length*alignment+b.halfWidth*crossing+pad &&
+             Math.abs(x*a.cos-z*a.sin)<a.halfWidth+b.length*crossing+b.halfWidth*alignment+pad &&
+             Math.abs(x*b.sin+z*b.cos)<b.length+a.length*alignment+a.halfWidth*crossing+pad &&
+             Math.abs(x*b.cos-z*b.sin)<b.halfWidth+a.length*crossing+a.halfWidth*alignment+pad;
+    }
+
+    function trafficPose(npc,at) {
+      const [east,south]=roadSample(npc.lane,at);
+      const [x,z]=roadSample(npc.lane,at-1.9);
+      const [a,b]=roadSample(npc.lane,at+1.9);
+      const heading=Math.atan2(a-x,b-z);
+      const body=trafficBox(east,south,heading,npc.halfWidth,npc.front,npc.back);
+      if (!npc.trailer) return {east,south,heading,boxes:[body]};
+      const hitchEast=east-Math.sin(heading)*1.58, hitchSouth=south-Math.cos(heading)*1.58;
+      const [axleEast,axleSouth]=roadSample(npc.lane,at-11.0);
+      const trailerHeading=Math.atan2(hitchEast-axleEast,hitchSouth-axleSouth);
+      const offset=npc.trailerHalf-.52;
+      const trailerEast=hitchEast-Math.sin(trailerHeading)*offset;
+      const trailerSouth=hitchSouth-Math.cos(trailerHeading)*offset;
+      const trailer=trafficBox(trailerEast,trailerSouth,trailerHeading,npc.trailerWidth,npc.trailerHalf,npc.trailerHalf+.08);
+      return {east,south,heading,trailerEast,trailerSouth,trailerHeading,boxes:[body,trailer]};
+    }
+
+    function trafficBlocked(boxes,except=null,player=null) {
+      if (player && boxes.some(box=>trafficOverlap(box,player))) return true;
+      return roadsideTraffic.some(npc=>npc!==except && npc.active &&
+        boxes.some(box=>npc.pose.boxes.some(other=>trafficOverlap(box,other))));
+    }
+
+    function occupiedByTraffic(east,south,heading,width,front,back) {
+      return trafficRoot.visible && trafficBlocked([trafficBox(east,south,heading,width,front,back)]);
+    }
+
+    function approachingVehicle(box,front,limit,speed,other,otherSpeed) {
+      const dx=other.east-box.east,dz=other.south-box.south;
+      const longitudinal=dx*box.sin+dz*box.cos;
+      if (longitudinal<=0 || longitudinal>10+speed*2.25+other.radius) return limit;
+      const lateral=Math.abs(dx*box.cos-dz*box.sin);
+      const direction=box.sin*other.sin+box.cos*other.cos;
+      const cross=Math.abs(box.cos*other.sin-box.sin*other.cos);
+      const width=other.halfWidth*Math.abs(direction)+other.length*cross;
+      if (lateral>box.halfWidth+width+.14) return limit;
+      const halfLength=other.length*Math.abs(direction)+other.halfWidth*cross;
+      const gap=longitudinal-halfLength-front;
+      const aheadSpeed=Math.max(0,otherSpeed*direction);
+      const available=gap-1.65-aheadSpeed*.84;
+      const target=available>0 ? aheadSpeed+available*.71 : Math.max(0,aheadSpeed+available*1.40);
+      return Math.min(limit,target);
+    }
+
+    function trafficSpeedLimit(east,south,heading,width,front,speed,limit,parkingAim=null) {
+      if (!trafficRoot.visible) return limit;
+      const probe=trafficBox(east,south,heading,width,0,0);
+      const steerAway=parkingAim ? (parkingAim[0]-east)*probe.cos-(parkingAim[1]-south)*probe.sin : 0;
+      for (const npc of roadsideTraffic) {
+        if (!npc.active) continue;
+        for (const part of npc.pose.boxes) {
+          const lateral=(part.east-east)*probe.cos-(part.south-south)*probe.sin;
+          const opposing=part.sin*probe.sin+part.cos*probe.cos<-.68;
+          // A vehicle in the other lane can pass while the Hilux turns away from it.
+          if (opposing && lateral*steerAway<-.10 && Math.abs(lateral)>width+part.halfWidth+.04) continue;
+          limit=approachingVehicle(probe,front,limit,speed,part,npc.speed);
+        }
+      }
+      return limit;
+    }
+
+    function busyHighway(east,south) {
+      if (!trafficRoot.visible) return false;
+      return roadsideTraffic.some(npc=>{
+        if (!npc.active || npc.index>1 || Math.hypot(npc.pose.east-east,npc.pose.south-south)>70) return false;
+        const crossing=nearestRoadProgress(npc.lane,east,south,npc.along,78);
+        if (crossing.distance>7.5 || npc.along-npc.tail>crossing.at+5) return false;
+        const gap=crossing.at-npc.along-npc.front;
+        return gap<Math.max(19,npc.speed*3.2);
+      });
+    }
+
+    function routeTrafficGates(path) {
+      const result=[];
+      for (const zone of trafficZones) {
+        const corridors=zone.limits.flatMap((span,index)=>{
+          if (!span) return [];
+          const line=carriageways[index], [first,last]=span;
+          const points=[];
+          for (let at=first;at<last;at+=3) points.push(roadSample(line,at).slice(0,2));
+          points.push(roadSample(line,last).slice(0,2));
+          return [pathFromPoints(points)];
+        });
+        const points=corridors.flatMap(line=>line.points);
+        const x=points.map(point=>point[0]),z=points.map(point=>point[1]);
+        const west=Math.min(...x)-5,east=Math.max(...x)+5,north=Math.min(...z)-5,south=Math.max(...z)+5;
+        let enter=null;
+        for (let at=0;at<=path.length+2;at+=2) {
+          const [x,z]=roadSample(path,at);
+          const close=at<=path.length && x>west && x<east && z>north && z<south &&
+            corridors.some(line=>nearestRoadProgress(line,x,z).distance<5);
+          if (close && enter===null) enter=at;
+          if (!close && enter!==null) {
+            if (at-enter>=6) result.push({zone,enter,leave:Math.min(path.length,at)});
+            enter=null;
+          }
+        }
+      }
+      return result.sort((a,b)=>a.enter-b.enter);
+    }
+
+    let driverTrafficZone=null;
+    function yieldToTrafficZone(path,at,limit) {
+      const next=trafficRoot.visible && path.gates.find(gate=>at>=gate.enter-27 && at<=gate.leave+8);
+      driverTrafficZone=null;
+      if (!next) return limit;
+      const committed=next.zone.owner==="driver" && at>=next.enter-5;
+      const frontOfQueue=committed || !roadsideTraffic.some(npc=>{
+        if (!npc.active) return false;
+        const ahead=nearestRoadProgress(path,npc.pose.east,npc.pose.south,at,50);
+        return ahead.distance<2.95 && ahead.at>at+1.2 && ahead.at<next.enter+5 &&
+          Math.cos(npc.pose.heading-roadSample(path,ahead.at)[2])>.64;
+      });
+      if (frontOfQueue) driverTrafficZone=next.zone;
+      if (frontOfQueue && next.zone.owner==="driver") return limit;
+      const stopAt=Math.max(0,next.enter-8);
+      return Math.min(limit,Math.sqrt(Math.max(0,stopAt-at)*4.2));
     }
 
     let trafficEpoch=performance.now();
-    let trafficTime=0;
-    function updateTraffic(time) {
-      const visible = villageTrafficToggle.checked && surroundingsToggle.checked;
-      trafficRoot.visible=visible;
-      if (!visible) return;
-      trafficTime += Math.max(0,Math.min(.10,(time-trafficEpoch)/1000));
-      trafficEpoch=time;
+    let trafficStarted=false;
+    let trafficHadPlayer=false;
+    function inTrafficZone(npc,gate,along=npc.along) {
+      return along+npc.front>=gate.enter && along-npc.tail<gate.leave;
+    }
+
+    function updateTrafficPriority(zone,dt) {
+      let closestMain=null,closestVillage=null,next=null,occupied=null;
       for (const npc of roadsideTraffic) {
-        const along=(npc.phase+trafficTime*npc.speed)%npc.path.length;
-        const distance=npc.direction>0 ? along : npc.path.length-along;
-        const [e,z]=roadSample(npc.path,distance);
-        const [beforeX,beforeZ]=roadSample(npc.path,distance-2.25);
-        const [aheadX,aheadZ]=roadSample(npc.path,distance+2.25);
-        const heading=Math.atan2((aheadX-beforeX)*npc.direction,(aheadZ-beforeZ)*npc.direction);
-        npc.east=e-Math.cos(heading)*npc.lane;
-        npc.south=z+Math.sin(heading)*npc.lane;
-        npc.heading=heading;
-        npc.car.position.set(npc.east,groundHeight(npc.east,npc.south)+.24,npc.south);
-        npc.car.rotation.y=heading;
-        npc.car.visible=along>4 && along<npc.path.length-4;
+        if (!npc.active) continue;
+        const gate=npc.gates.find(gate=>gate.zone===zone);
+        if (!gate) continue;
+        if (inTrafficZone(npc,gate)) occupied=npc;
+        const gap=gate.enter-npc.along-npc.front;
+        gate.waiting=gap>=0 && gap<8 && npc.speed<.9 ? gate.waiting+dt : 0;
+        if (gap<0) continue;
+        const time=gap/Math.max(2.5,npc.speed);
+        if (gap<6 && gate.waiting>2 && (!next || gate.waiting>next.waiting)) next={npc,waiting:gate.waiting};
+        if (npc.index===0 && (!closestMain || time<closestMain.time)) closestMain={npc,time};
+        if (npc.index!==0 && (!closestVillage || time<closestVillage.time)) closestVillage={npc,time};
       }
+      if (occupied) {
+        zone.owner=occupied.mergeGroup;
+        zone.reservation=0;
+        return;
+      }
+      if (driverTrafficZone===zone) {
+        zone.owner="driver";
+        zone.reservation=0;
+        return;
+      }
+      zone.reservation=Math.max(0,zone.reservation-dt);
+      if (zone.reservation>0) return;
+      const approaching=closestMain?.time<3.4 ? closestMain.npc : closestVillage?.time<2.6 ? closestVillage.npc : null;
+      zone.owner=(next?.npc || approaching)?.mergeGroup ?? null;
+      if (zone.owner!==null) zone.reservation=next ? 3.8 : 1.25;
+    }
+
+    function startTrafficCar(npc,at,player,rolling=false) {
+      if (npc.gates.some(gate=>inTrafficZone(npc,gate,at) && gate.zone.owner!==npc.mergeGroup)) return false;
+      const pose=trafficPose(npc,at);
+      if (trafficBlocked(pose.boxes,npc,player)) return false;
+      if (roadsideTraffic.some(other=>other!==npc && other.active && npc.lane===other.lane &&
+        Math.abs(other.along-at)<other.tail+npc.front+9)) return false;
+      npc.pose=pose;
+      npc.along=at;
+      npc.speed=rolling ? npc.desiredSpeed*.83 : npc.desiredSpeed*.42;
+      npc.active=true;
+      for (const gate of npc.gates) gate.waiting=0;
+      return true;
+    }
+
+    function stepTraffic(dt,player) {
+      if (!trafficStarted) {
+        trafficStarted=true;
+        for (const npc of roadsideTraffic) {
+          const startsInZone=npc.gates.some(gate=>inTrafficZone(npc,gate,npc.initial));
+          startTrafficCar(npc,startsInZone ? npc.start : npc.initial,player,true);
+        }
+      }
+      for (const zone of trafficZones) updateTrafficPriority(zone,dt);
+      for (const npc of roadsideTraffic) {
+        if (!npc.active) {
+          npc.delay=Math.max(0,npc.delay-dt);
+          if (npc.delay===0) startTrafficCar(npc,npc.start,player);
+          continue;
+        }
+        const {lane,along,pose}=npc;
+        const heading=roadSample(lane,along+15)[2]-roadSample(lane,along+2)[2];
+        const turn=Math.abs(Math.atan2(Math.sin(heading),Math.cos(heading)));
+        let limit=Math.min(npc.desiredSpeed,npc.desiredSpeed/(1+2.4*turn));
+        let stopAt=Infinity;
+        for (const gate of npc.gates) {
+          if (gate.zone.owner===npc.mergeGroup || along+npc.front>=gate.enter) continue;
+          stopAt=Math.min(stopAt,gate.enter-npc.front-.6);
+        }
+        limit=Math.min(limit,Math.sqrt(Math.max(0,stopAt-along-.9)*5.4));
+        for (const lead of roadsideTraffic) {
+          if (!lead.active || lead===npc) continue;
+          let leaderAt=lead.along;
+          if (lead.lane!==lane) {
+            if (lead.index===npc.index || lead.index>1 || npc.index>1 ||
+                Math.hypot(lead.pose.east-pose.east,lead.pose.south-pose.south)>48 ||
+                Math.cos(lead.pose.heading-pose.heading)<.72) continue;
+            const match=nearestRoadProgress(lane,lead.pose.east,lead.pose.south,along,50);
+            if (match.distance>.86) continue;
+            leaderAt=match.at;
+          }
+          if (leaderAt<=along) continue;
+          const gap=leaderAt-lead.tail-along-npc.front;
+          const extra=gap-2.6-lead.speed*.95;
+          limit=Math.min(limit,Math.max(0,lead.speed+extra*.64));
+        }
+        if (player && Math.hypot(player.east-pose.east,player.south-pose.south)<52) {
+          const match=nearestRoadProgress(lane,player.east,player.south,along,54);
+          if (match.at>along && match.distance<1.10) {
+            const direction=Math.cos(player.heading-roadSample(lane,match.at)[2]);
+            const distance=match.at-along-npc.front-player.length*Math.abs(direction)-
+              player.halfWidth*Math.sqrt(Math.max(0,1-direction*direction))-1.4;
+            const moving=Math.max(0,player.speed*direction);
+            limit=Math.min(limit,Math.max(0,moving+(distance-moving*.8)*.77));
+          }
+        }
+        const before=npc.speed;
+        const acceleration=npc.trailer ? 1.0 : 1.65;
+        let speed=Math.max(0,before+Math.max(-5.2,Math.min(acceleration,(limit-before)*2.15))*dt);
+        let next=along+speed*dt;
+        if (next>stopAt) {
+          next=Math.max(along,stopAt);
+          speed=(next-along)/dt || 0;
+        }
+        if (next>lane.length-2.2) {
+          npc.active=false;
+          npc.delay=2.6+(npc.start+lane.length)%6;
+          continue;
+        }
+        if (speed>0) {
+          const updated=trafficPose(npc,next);
+          if (trafficBlocked(updated.boxes,npc,player)) speed=0;
+          else {
+            npc.pose=updated;
+            npc.along=next;
+          }
+        }
+        npc.speed=speed;
+        npc.braking=limit<before-.28 || speed<before-.19 || (speed<.3&&limit<.4);
+      }
+    }
+
+    function showTrafficCar(npc) {
+      npc.body.visible=npc.active;
+      if (npc.trailer) npc.trailer.visible=npc.active;
+      if (!npc.active) return;
+      const {east,south,heading,trailerEast,trailerSouth,trailerHeading}=npc.pose;
+      placeTrafficModel(npc.body,east,south,heading,1.8);
+      npc.brake.material=npc.braking ? trafficBrakeMaterial : trafficTailMaterial;
+      if (npc.trailer) {
+        placeTrafficModel(npc.trailer,trailerEast,trailerSouth,trailerHeading,4.4);
+        npc.trailerBrake.material=npc.brake.material;
+      }
+    }
+
+    function placeTrafficModel(mesh,east,south,heading,span) {
+      const x=Math.sin(heading)*span,z=Math.cos(heading)*span;
+      const pitch=-Math.atan2(groundHeight(east+x,south+z)-groundHeight(east-x,south-z),2*span);
+      mesh.position.set(east,groundHeight(east,south)+.24,south);
+      mesh.rotation.set(pitch,heading,0,"YXZ");
+    }
+
+    function updateTraffic(time) {
+      const wasVisible=trafficRoot.visible;
+      trafficRoot.visible=villageTrafficToggle.checked && surroundingsToggle.checked;
+      const delta=Math.max(0,Math.min(.12,(time-trafficEpoch)/1000));
+      trafficEpoch=time;
+      if (!trafficRoot.visible) {
+        trafficHadPlayer=false;
+        return;
+      }
+      const player=mode==="drive" ? drive.collisionBody() : null;
+      if ((!wasVisible || !trafficHadPlayer) && player) {
+        for (const npc of roadsideTraffic) if (npc.active && npc.pose.boxes.some(box=>trafficOverlap(box,player))) {
+          npc.active=false;
+          npc.delay=3;
+        }
+      }
+      trafficHadPlayer=Boolean(player);
+      const steps=Math.max(1,Math.ceil(delta/.033));
+      for (let i=0;i<steps;i++) stepTraffic(delta/steps,player);
+      for (const npc of roadsideTraffic) showTrafficCar(npc);
+      updateTrafficShadows();
     }
 
     villageTrafficToggle.addEventListener("change",requestDraw);
@@ -6507,7 +7066,7 @@ THE SOFTWARE.
       if (document.hidden || !villageTrafficToggle.checked || !surroundingsToggle.checked) return;
       if (mode==="drive" && drive.isAnimating()) return;
       if (mode!=="overview" && mode!=="fallback") requestDraw();
-    },65);
+    },55);
     function installDriving() {
       const model = JSON.parse($("vehicle-data").textContent);
       const hud = $("drive-hud");
@@ -6807,6 +7366,7 @@ THE SOFTWARE.
 
       function stopAuto(message="", preferAuto=false) {
         autopilot=null;
+        driverTrafficZone=null;
         autoPreferred=preferAuto;
         updateAutoUI(message);
       }
@@ -6827,7 +7387,7 @@ THE SOFTWARE.
           const distance = Math.min(speedSample,path.length-i*speedSample);
           speed[i]=Math.min(speed[i],Math.sqrt(speed[i+1]**2+2*2.8*distance));
         }
-        return {...route,...path,speed};
+        return {...route,...path,speed,gates:routeTrafficGates(path)};
       }
 
       function startAuto() {
@@ -6909,16 +7469,16 @@ THE SOFTWARE.
         const roadSpeed = path.speed[i]+(path.speed[i+1]-path.speed[i])*along;
         let limit = Math.min(roadSpeed,autopilotTopSpeed/(1+6*Math.abs(error)),
           Math.sqrt(Math.max(0,remaining-.13)*3.2));
-        if (trafficRoot.visible) {
-          const sin = Math.sin(heading), cos = Math.cos(heading);
-          for (const npc of roadsideTraffic) {
-            const dx=npc.east-state.east,dz=npc.south-state.south;
-            const front=dx*sin+dz*cos, lateral=dx*cos-dz*sin;
-            if (npc.car.visible && front>0 && front<15+Math.abs(state.speed)*1.25 && Math.abs(lateral)<1.55) {
-              limit=Math.min(limit,Math.max(0,(front-5.4)*.78));
-            }
+        const junction=path.highway[0]?.[0];
+        if (path.quarterEnd && junction && autopilot.at>junction-35 && autopilot.at<junction-10) {
+          const [mergeEast,mergeSouth]=roadSample(path,junction);
+          if (busyHighway(mergeEast,mergeSouth)) {
+            limit=Math.min(limit,Math.sqrt(Math.max(0,junction-12-autopilot.at)*3.8));
           }
         }
+        limit=trafficSpeedLimit(state.east,state.south,heading,model.width/2,2.78,Math.abs(state.speed),limit,
+          parkingManeuver ? [x,z] : null);
+        limit=yieldToTrafficZone(path,autopilot.at,limit);
         return {steering,limit,direction,remaining};
       }
 
@@ -6961,12 +7521,13 @@ THE SOFTWARE.
         const heading = state.heading+yawRate*dt;
         const middle = (heading+state.heading)/2;
         const traveled = state.speed*dt;
-        let hit = false;
+        let hit = false, trafficHit = false;
         if (Math.abs(traveled)>1e-5) {
           const east = state.east+Math.sin(middle)*traveled;
           const south = state.south+Math.cos(middle)*traveled;
           hit = !driveClear(east,south,heading);
-          if (hit) {
+          trafficHit = occupiedByTraffic(east,south,heading,model.width/2,2.66,2.76);
+          if (hit || trafficHit) {
             state.speed=0;
             yawRate=0;
           } else {
@@ -6981,7 +7542,7 @@ THE SOFTWARE.
         const force = Math.max(-9,Math.min(5,(state.speed-before)/dt));
         refreshSuspension(dt,force,yawRate);
         return braking || (automatic && Math.abs(state.speed)<Math.abs(before)-.02) ||
-          (reverse && before>.1) || (gas && before<-.1) || hit;
+          (reverse && before>.1) || (gas && before<-.1) || hit || trafficHit;
       }
 
       function advance(time) {
@@ -7075,6 +7636,9 @@ THE SOFTWARE.
       pose(false);
       return {
         camera,state,car,wheels,chassis,integrate,releaseAll,
+        collisionBody() {
+          return {...trafficBox(state.east,state.south,state.heading,model.width/2,2.66,2.76),speed:state.speed};
+        },
         get viewHeading() { return cameraView==="chase" ? chaseHeading+orbitYaw : renderedPose.heading; },
         isAnimating() { return frame!==0; },
         orbitStart(event) {
@@ -7113,6 +7677,7 @@ THE SOFTWARE.
           delete viewport.dataset.driveCamera;
           delete viewport.dataset.autopilot;
           autopilot=null;
+          driverTrafficZone=null;
           orbitPointer=null;
           releaseAll();
           cancelAnimationFrame(frame);
